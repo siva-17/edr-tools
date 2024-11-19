@@ -1,0 +1,6 @@
+<pkg-info format-version="2" identifier="com.sangfor.pkg.edrinstaller" version="1.0" relocatable="false" overwrite-permissions="false" followSymLinks="false" install-location="/Library/sf" auth="root">
+<payload installKBytes="4453" numberOfFiles="4"/>
+<scripts>
+    <postinstall file="./postinstall"/>
+</scripts>
+</pkg-info>

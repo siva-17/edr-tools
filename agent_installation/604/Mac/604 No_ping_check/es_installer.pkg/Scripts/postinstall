@@ -1,0 +1,420 @@
+#!/bin/bash
+SCRIPT_PATH=`cd $(dirname $0);pwd -P`
+
+#Set the device in English
+export LANG=""
+export LANGUAGE=""
+
+SCRIPT_MODULE="check_agent_install"
+g_szLogDir="/tmp"
+g_szLogFileName="install_log"
+g_szLogFile="$g_szLogDir/$g_szLogFileName"
+
+function write_log()
+{
+	local dateTime
+	dateTime=$(date "+%Y/%m/%d %H:%M:%S")
+	g_szLogFile="$g_szLogDir/$g_szLogFileName"
+
+	if [ ! -d ${g_szLogDir} ]; then
+		if mkdir -p "${g_szLogDir}" > /dev/null 2>&1; then
+			echo "[$1][$dateTime][${SCRIPT_MODULE}]create dir ${g_szLogDir} successfully" >> "${g_szLogFile}" 2>&1
+		else
+			g_szLogFile="$g_szLogFileName"
+			echo "[$1][$dateTime][${SCRIPT_MODULE}]create dir ${g_szLogDir} failed" >> "${g_szLogFile}" 2>&1
+		fi
+	fi
+
+	echo "[$1][$dateTime][${SCRIPT_MODULE}]${2}" >> "${g_szLogFile}" 2>&1
+}
+
+#Manager Installer ------------------->
+
+# get manager infomation from name of pkg
+function get_ip_port()
+{
+    file_name=$1
+    if [ -z "$file_name" ]; then
+        return -1
+    fi
+    edr=`echo $1 | awk -F'_' '{ print $1}'`
+    installer=`echo $1 | awk -F'_' '{ print $2}'`
+    hostStr=`echo $1 | awk -F'_' '{ print $3}'`
+    if [ -z "$hostStr" ]; then
+        ip=127.0.0.1
+    fi
+    port_raw=`echo $1 | awk -F'_' '{ print $4 }'`
+    #port=`echo $port_raw | grep -E "/^[0-9]+"`
+    portStr=`echo $port_raw | sed 's/[^0-9]/ /g'`
+    portStr=`echo $portStr | awk -F' ' '{ print $1 }'`
+    if [ -z "$portStr" ]; then
+        port=443
+    fi
+    szuid_raw=`echo $1 | awk -F'_' '{ print $5 }'`
+    szuid_str=`echo $szuid_raw | sed 's/[^0-9]/ /g'`
+    szuid=`echo $szuid_str | awk -F' ' '{ print $1 }'`
+}
+
+edrInstallerName=$1
+InstallerName=${edrInstallerName##*/}
+echo "current pkgName : ${InstallerName}"
+
+get_ip_port ${InstallerName}
+echo "the MGR adress is host:port : $hostStr:$portStr"
+echo "the szuid is: $szuid"
+
+function checkip() { 
+	regex="\b(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[1-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\b"
+	ckStep2=`echo $1 | egrep $regex | wc -l`
+	if [ $ckStep2 -eq 0 ]
+	then
+       return 1
+	else
+       return 0
+	fi
+}
+
+function checkport() {
+	if [ -z $1 ];then
+		return 1
+	fi
+
+	if [ $1 -gt 65536 ] || [ $1 -lt 0 ] ;then
+		return 1
+	fi
+	return 0
+}
+return_usage() {
+	echo -e "Usage: $0 [OPTION]..."
+	echo -e "Example [1]: $0 \\033[40;31m(Use when there is manager_info.txt in the same directory)\\033[0m"
+	echo -e "        [2]: $0 -h 8.8.8.8 -p 443"
+	echo -e "  -h host       set mgr host"
+	echo -e "  -p port       set mgr port"
+	echo -e "  --help        display this help"
+	exit 1
+}
+
+# Root permission is required for script execution. macos
+# If the installation process requests an admin password, the pre- and post-installation scripts will be run as root.
+#  agent_install in package post script : $1 is cur pkg name
+# if [ -n "$1" ] && [ "$1" == "--help" ]; then
+# 	return_usage
+# fi
+
+
+while getopts "h:p" opt; do
+	case $opt in
+		h)
+			avai_ip=$hostStr
+			;;
+		p)
+			avai_port=$portStr
+			;;
+		\?)
+			return_usage
+			;;
+	esac
+done
+
+curr_dir=$(pwd)
+ips_info="/Library/sf/edr/install/manager_info.txt"
+function ReadINIfile()
+{
+    Key=$1
+    Section=$2
+    Configfile=$3
+    ReadINI=`awk -F '=' '/\['$Section'\]/{a=1}a==1&&$1~/'$Key'/{print $2;exit}' $Configfile | tr -d " "`
+    echo "$ReadINI"
+}
+
+function check_addr_available()
+{
+	if [ -z "$1" ] || [ -z "$2" ]; then
+		echo "Error: IP address and port must be provided."
+		return 1
+	fi
+
+	which bash >/dev/null 2>&1
+	if [ $? -eq 0 ]; then
+		which timeout >/dev/null 2>&1
+		if [ $? -eq 0 ]; then
+			if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$1/$2" >/dev/null 2>&1; then
+				echo "Success: $1:$2 is reachable."
+				return 0
+			else
+				echo "Error: $1:$2 is not reachable."
+				return 1
+			fi
+		else
+			echo "timeout is not available."
+			if bash -c "cat < /dev/null > /dev/tcp/$1/$2" >/dev/null 2>&1; then
+				echo "Success: $1:$2 is reachable."
+				return 0
+			else
+				echo "Error: $1:$2 is not reachable."
+				return 1
+			fi
+		fi
+	else
+		if ping -c 3 "$1" >/dev/null 2>&1; then
+			echo "Success: $1 is reachable."
+			return 0
+		else
+			echo "Error: $1 is not reachable."
+			return 1
+		fi
+	fi
+}
+
+if [ -z "$avai_port" ];then
+	if [ -f $ips_info ]; then
+		avai_port=`ReadINIfile "agt_download_port" "config" "$ips_info"`
+	fi
+	if [ -z $avai_port ];then
+		avai_port=$portStr
+	fi
+fi
+
+checkport $avai_port
+if [ $? -ne 0 ]; then
+	echo "Error: input params error, invalid port:$avai_port"
+	return_usage
+fi
+
+if [ -z "$avai_ip" ];then
+	bSucc=0
+	if [ -f $ips_info ]; then
+		addrCount=`ReadINIfile "count" "config" "$ips_info"`
+		for((i=0; i<addrCount; i++))
+		do
+			Key="addr""$i"
+			addr=`ReadINIfile "$Key" "config" "$ips_info"`
+
+			#Test connectivity to manager IP address
+			check_addr_available $addr $avai_port
+			if [ $? -ne 0 ]; then
+				echo "$addr can't be connected"
+			else
+				avai_ip=$addr
+				bSucc=1
+				echo "$avai_ip is available"
+				break
+			fi
+		done
+	fi
+#	if [ $bSucc != 1 ]; then
+#		return_usage
+#	fi
+fi
+
+# install failed dialog
+function ping_failed_dialog() {
+    #osascript ./applescripta.scpt
+
+exec osascript <<EOF
+    display dialog "The network connection is abnormal with the management platform." with title "Installation failed" buttons "OK" default button "OK" with icon caution
+	close application "Installer"
+EOF
+
+}
+
+# install failed dialog
+function download_failed_dialog() {
+    #osascript ./applescripta.scpt
+
+exec osascript <<EOF
+    display dialog "Failed to download terminal component,please check the network or authorization." with title "Installation failed" buttons "OK" default button "OK" with icon caution
+	close application "Installer"
+EOF
+
+}
+
+avai_ip=$hostStr
+
+#Test connectivity to manager IP address
+check_addr_available $avai_ip $avai_port
+if [ $? -ne 0 ];then
+	echo "manager addr:$avai_ip can't connect, please check your network."
+	ping_failed_dialog
+	exit 1
+fi
+
+#File mark, and 1 indicates the directory /sf/edr/agent is created by us.
+default_dir=0
+if [ -z "$installdir" ]; then
+	if [ ! -d /Library/sf/edr/agent ];then
+		default_dir=1
+	fi
+	installdir=/Library/sf/edr/agent
+fi
+
+function rm_sfupdate_darwin() {
+	if [ -f "/Library/sf/edr/install/sfupdate_darwin" ];then
+		rm -f "/Library/sf/edr/install/sfupdate_darwin" >/dev/null 2>&1
+	fi
+}
+
+# cleanup when install failed
+function cleanup() {
+	# remove com.sangfor.edr_agent.plist
+	if [ -f "/Library/LaunchDaemons/com.sangfor.edr_agent.plist" ];then
+		rm -f "/Library/LaunchDaemons/com.sangfor.edr_agent.plist" >/dev/null 2>&1
+	fi
+
+	# remove install dir
+	echo "installdir: ${installdir}"
+	rm -rf "${installdir}"
+
+	rm_sfupdate_darwin
+}
+
+#/tmp directory does not exist.
+if [ ! -d "/tmp" ]; then
+	mkdir -p /tmp
+fi
+
+#creat temp
+tmpdir=`mktemp -d /tmp/eps_agent.XXXXXX`
+function die()
+{
+	echo -e $*
+	write_log "error" "$*"
+	rm -rf $tmpdir
+	if [ $default_dir == 1 ];then
+		rm -rf $installdir
+	fi
+	exit 1
+}
+
+#creat install dir
+mkdir -p $installdir || die "Can not mkdir $installdir"
+
+#Write a file mark and delete the created directory /EDR when perform uninstallation 
+if [ $default_dir == 1 ];then
+	touch $installdir/default_dir_flag
+fi
+
+spctl --master-disable >/dev/null 2>&1
+
+longtype_length=`getconf LONG_BIT`
+sfupdate="/Library/sf/edr/install/sfupdate_darwin"
+
+chmod +x $sfupdate
+echo "start download edr module"
+tempdir=${installdir##*sf}
+
+#get install dir
+if [[ $tempdir != "/edr/agent" && $tempdir != "/edr/agent/" ]];then
+	lastChar=${installdir: -1}
+	if [ $lastChar != "/" ];then
+		installdir=$installdir"/sf/edr/agent"
+	else
+		installdir=$installdir"sf/edr/agent"
+	fi
+fi
+
+
+echo $sfupdate
+echo $installdir
+
+# 终端安装的时候并不能判断mgr是否为docker，根据是否能获取到szuid判断
+if [ "$szuid" = "" ]; then
+	echo "curr install path: $installdir url:https://${avai_ip}:${avai_port}"
+	$sfupdate -a "https://${avai_ip}:${avai_port}" -d $installdir -c
+else
+	echo "curr install path: $installdir url:https://${avai_ip}:${avai_port} uid :$szuid"
+	$sfupdate -a "https://${avai_ip}:${avai_port}" -d $installdir -c -u $szuid
+fi
+
+if [ $? -ne 0 ];then
+	cleanup
+	download_failed_dialog
+	die "download edr module fail."
+fi
+
+chmod 755 $installdir/bin
+chmod -R 0755 $installdir/config
+cp $sfupdate $installdir/bin/sfupdate
+xattr -c $installdir/bin/sfupdate
+chown -R root:admin /Library/sf
+
+if [ $? -ne 0 ];then
+	cleanup
+	download_failed_dialog
+	die "cp sfupdate fail."
+fi
+
+launchctl unload -w /Library/LaunchDaemons/com.sangfor.edr_agent.plist >/dev/null 2>&1
+launchctl load -w /Library/LaunchDaemons/com.sangfor.edr_agent.plist >/dev/null 2>&1
+
+SERVICE_NAME="eps_services_ctrl"
+EpsServicesPath=$installdir/bin/$SERVICE_NAME
+
+if [ -f "${EpsServicesPath}" ];then
+        ${EpsServicesPath} restart
+fi
+
+spctl --master-enable >/dev/null 2>&1
+
+#check and delete the config folder
+cur_dir=$(dirname $(pwd))
+config_dir="${cur_dir}/config"
+echo $config_dir
+
+if [ -d "${config_dir}" ];then
+    rm -rf ${config_dir}
+fi
+
+# remove sfupdate_darwin
+rm_sfupdate_darwin
+
+#install EndpointSecure.app
+if [ -d $installdir/bin/EndpointSecure.app ];then
+
+	# 增加一个语言版本判断，然后选择对应的品牌切换资源文件
+	SFE_VERSION_LANG=""
+	if [ -f $installdir/bin/sfe_version_check ]; then
+		SFE_VERSION_LANG=$($installdir/bin/sfe_version_check)
+	fi
+
+	if [ "$SFE_VERSION_LANG"x == "SFE_VERSION_HK"x ]; then
+		UPDATE_BRANGD_JOSN="brand.en_us.json"
+	else
+		UPDATE_BRANGD_JOSN="brand.zh_cn.json"
+	fi
+
+	#获取json文件中，以 ：为分隔符，选中product_name那行的第二列的值
+	APP_NAME=$(awk -F ":" /product_name/'{print $2}' $installdir/config/$UPDATE_BRANGD_JOSN)
+	#去掉获取到的值的双引号和逗号
+	APP_NAME=$(echo $APP_NAME | sed 's/\"//g' | sed 's/,//g')
+	#根据获取到的产品名称生成快捷方式
+    `ln -s $installdir/bin/EndpointSecure.app "/Applications/$APP_NAME.app" >/dev/null 2>&1`
+
+    echo "Successed to create a stunt double."
+else
+    echo "The main application does not exist."
+fi
+
+echo "download edr module success"
+
+#guid user to add full disk access
+function full_disk_access() {
+    #osascript ./applescripta.scpt
+exec osascript <<EOF
+    display dialog "Please read the summary carefully." with title "Full Disk Access" buttons "OK" default button "OK" with icon caution
+
+    do shell script "open x-apple.systempreferences:com.apple.preference.security?Privacy_Assistive"
+
+    do shell script "open /Library/sf/edr/agent/bin"
+    
+    activate application "Installer"
+EOF
+}
+
+# if the osx system is > 10.13* and pop it
+mac_version=`/usr/libexec/PlistBuddy -c "Print ProductVersion" /System/Library/CoreServices/SystemVersion.plist`
+if [[ $mac_version != 10.13* ]];then
+    full_disk_access
+fi
+
+write_log "info" "install agent success"
